@@ -1,0 +1,16 @@
+Network:
+  weight_decay: 0.01
+  amsgrad: False
+  num_epochs: 150
+network_output_path: network_data/
+output_data_path: output_data/
+tb_logs_path: tensor_board_logs/
+stat_log_path: stat_logs
+checkpoint_name: checkpoint.tar
+trained_model_name: trained_model.pth
+
+# changeable items:
+file_path: /PATH/
+target_dir: /PATH/
+display_stats_freq: 1 # valid freq is equal to this
+
