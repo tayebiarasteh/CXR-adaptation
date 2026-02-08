@@ -49,24 +49,28 @@ class Prediction:
             self.device = torch.device('cpu')
 
 
-    def setup_model(self, model, model_file_name=None, epoch_num=100):
+    def setup_model(self, model, model_file_name=None, epoch_num=100, init_mode=False):
         if model_file_name == None:
             model_file_name = self.params['trained_model_name']
         self.model = model.to(self.device)
 
         # self.model.load_state_dict(torch.load(os.path.join(self.params['target_dir'], self.params['network_output_path'], model_file_name)))
         # self.model.load_state_dict(torch.load(os.path.join(self.params['target_dir'], self.params['network_output_path']) + "epoch300_" + model_file_name))
-        self.model.load_state_dict(torch.load(os.path.join(self.params['target_dir'], self.params['network_output_path']) + "epoch" + str(epoch_num) + "_" + model_file_name))
+        if not init_mode:
+            self.model.load_state_dict(torch.load(os.path.join(self.params['target_dir'], self.params['network_output_path']) + "epoch" + str(epoch_num) + "_" + model_file_name))
 
 
 
-    def setup_model_DP(self, model, privacy_engine, epoch_num=10):
+    def setup_model_DP(self, model, privacy_engine, epoch_num=10, init_mode=False):
         self.device = None
         self.setup_cuda()
         self.model = model.to(self.device)
         self.privacy_engine = privacy_engine
-        self.privacy_engine.load_checkpoint(module=self.model, path=os.path.join(self.params['target_dir'], self.params['network_output_path']) + "epoch" + str(epoch_num) + "_" + self.params['DP_checkpoint_name'])
-
+        if not init_mode:
+            try:
+                self.privacy_engine.load_checkpoint(module=self.model, path=os.path.join(self.params['target_dir'], self.params['network_output_path']) + "epoch" + str(epoch_num) + "_" + self.params['DP_checkpoint_name'])
+            except:
+                self.model.load_state_dict(torch.load(os.path.join(self.params['target_dir'], self.params['network_output_path']) + "epoch" + str(epoch_num) + "_" + self.params['trained_model_name']))
 
 
     def predict_only(self, test_loader, vit_imgnet=True, vit_dino=True, convnext=True):
@@ -203,7 +207,7 @@ class Prediction:
 
 
 
-    def bootstrapper(self, preds_with_sigmoid, targets, index_list, testsetname, demographics='Full_set'):
+    def bootstrapper(self, preds_with_sigmoid, targets, index_list, testsetname):
         # self.model.eval()
         AUC_list = []
         accuracy_list = []
@@ -362,54 +366,54 @@ class Prediction:
             f'[95% CI: {F1_avg_lo * 100:.2f}, {F1_avg_hi * 100:.2f}]\n\n'
         )
 
-        os.makedirs(os.path.join(self.params['target_dir'], self.params['stat_log_path'], demographics), exist_ok=True)
+        os.makedirs(os.path.join(self.params['target_dir'], self.params['stat_log_path']), exist_ok=True)
         with open(
-                os.path.join(self.params['target_dir'], self.params['stat_log_path'], demographics) + '/Test_on_' + str(testsetname),
+                os.path.join(self.params['target_dir'], self.params['stat_log_path']) + '/Test_on_' + str(testsetname),
                 'a') as f:
             f.write(msg)
 
 
         msg = f'Individual AUROC:\n'
         with open(
-                os.path.join(self.params['target_dir'], self.params['stat_log_path'], demographics) + '/Test_on_' + str(testsetname),
+                os.path.join(self.params['target_dir'], self.params['stat_log_path']) + '/Test_on_' + str(testsetname),
                 'a') as f:
             f.write(msg)
         for idx, pathology in enumerate(self.label_names):
             msg = f'{pathology}: {AUC_list[:, idx].mean() * 100:.2f} ± {AUC_list[:, idx].std() * 100:.2f} [95% CI: {auc_lo[idx] * 100:.2f}, {auc_hi[idx] * 100:.2f}] | '
-            with open(os.path.join(self.params['target_dir'], self.params['stat_log_path'], demographics) + '/Test_on_' + str(
+            with open(os.path.join(self.params['target_dir'], self.params['stat_log_path']) + '/Test_on_' + str(
                     testsetname), 'a') as f:
                 f.write(msg)
 
         msg = f'\n\nIndividual accuracy:\n'
         with open(
-                os.path.join(self.params['target_dir'], self.params['stat_log_path'], demographics) + '/Test_on_' + str(testsetname),
+                os.path.join(self.params['target_dir'], self.params['stat_log_path']) + '/Test_on_' + str(testsetname),
                 'a') as f:
             f.write(msg)
         for idx, pathology in enumerate(self.label_names):
             msg = f'{pathology}: {accuracy_list[:, idx].mean() * 100:.2f} ± {accuracy_list[:, idx].std() * 100:.2f} [95% CI: {acc_lo[idx] * 100:.2f}, {acc_hi[idx] * 100:.2f}] | '
-            with open(os.path.join(self.params['target_dir'], self.params['stat_log_path'], demographics) + '/Test_on_' + str(
+            with open(os.path.join(self.params['target_dir'], self.params['stat_log_path']) + '/Test_on_' + str(
                     testsetname), 'a') as f:
                 f.write(msg)
 
         msg = f'\n\nIndividual sensitivity:\n'
         with open(
-                os.path.join(self.params['target_dir'], self.params['stat_log_path'], demographics) + '/Test_on_' + str(testsetname),
+                os.path.join(self.params['target_dir'], self.params['stat_log_path']) + '/Test_on_' + str(testsetname),
                 'a') as f:
             f.write(msg)
         for idx, pathology in enumerate(self.label_names):
             msg = f'{pathology}: {sensitivity_list[:, idx].mean() * 100:.2f} ± {sensitivity_list[:, idx].std() * 100:.2f} [95% CI: {sens_lo[idx] * 100:.2f}, {sens_hi[idx] * 100:.2f}] | '
-            with open(os.path.join(self.params['target_dir'], self.params['stat_log_path'], demographics) + '/Test_on_' + str(
+            with open(os.path.join(self.params['target_dir'], self.params['stat_log_path']) + '/Test_on_' + str(
                     testsetname), 'a') as f:
                 f.write(msg)
 
         msg = f'\n\nIndividual specificity:\n'
         with open(
-                os.path.join(self.params['target_dir'], self.params['stat_log_path'], demographics) + '/Test_on_' + str(testsetname),
+                os.path.join(self.params['target_dir'], self.params['stat_log_path']) + '/Test_on_' + str(testsetname),
                 'a') as f:
             f.write(msg)
         for idx, pathology in enumerate(self.label_names):
             msg = f'{pathology}: {specificity_list[:, idx].mean() * 100:.2f} ± {specificity_list[:, idx].std() * 100:.2f} [95% CI: {spec_lo[idx] * 100:.2f}, {spec_hi[idx] * 100:.2f}] | '
-            with open(os.path.join(self.params['target_dir'], self.params['stat_log_path'], demographics) + '/Test_on_' + str(
+            with open(os.path.join(self.params['target_dir'], self.params['stat_log_path']) + '/Test_on_' + str(
                     testsetname), 'a') as f:
                 f.write(msg)
 
@@ -417,6 +421,48 @@ class Prediction:
         for idx in range(AUC_list.shape[-1]):
             df.insert(idx + 1, 'AUC_' + str(idx + 1), AUC_list[:, idx])
 
-        df.to_csv(os.path.join(self.params['target_dir'], self.params['stat_log_path'], demographics) + '/bootstrapped_AUC_Test_on' + str(testsetname) + '.csv', sep=',', index=False)
+        df.to_csv(os.path.join(self.params['target_dir'], self.params['stat_log_path']) + '/bootstrapped_AUC_Test_on' + str(testsetname) + '.csv', sep=',', index=False)
 
         return AUC_list
+
+
+
+    def predict_embeddings(self, test_loader, vit_imgnet=True, vit_dino=True, convnext=True, l2_normalize=True):
+        """
+        Step 1: extract embeddings Z (and optionally labels Y) on the given loader.
+
+        For ConvNeXt (your setup): embeddings are output.pooler_output (dim=768 for convnext-small).
+        Returns:
+            embeddings_cache: (N, D) torch.Tensor on CPU
+            labels_cache:      (N, C) torch.Tensor on CPU
+        """
+        self.model.eval()
+
+        # caches on GPU first, then move to CPU at the end (much faster than repeated torch.cat)
+        embeddings_list = []
+        labels_list = []
+
+        for idx, (image, label) in enumerate(tqdm(test_loader)):
+
+            image = image.to(self.device, non_blocking=True)
+            label = label.to(self.device, non_blocking=True).float()
+
+            with torch.no_grad():
+                if convnext:
+                    out = self.model(image)
+                    z = out.pooler_output  # (B, D)  D=768 for convnext-small
+                else:
+                    # if you ever use another backbone, put its embedding extraction here
+                    out = self.model(image)
+                    z = out.pooler_output
+
+                if l2_normalize:
+                    z = F.normalize(z, p=2, dim=1)
+
+            embeddings_list.append(z.detach())
+            labels_list.append(label.detach())
+
+        embeddings_cache = torch.cat(embeddings_list, dim=0).cpu()
+        labels_cache = torch.cat(labels_list, dim=0).cpu()
+
+        return embeddings_cache, labels_cache
