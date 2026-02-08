@@ -8,9 +8,17 @@ tb_logs_path: tensor_board_logs/
 stat_log_path: stat_logs
 checkpoint_name: checkpoint.tar
 trained_model_name: trained_model.pth
+DP_checkpoint_name: DP_checkpoint.tar
+hf_login: "key"
 
 # changeable items:
-file_path: /PATH/
-target_dir: /PATH/
+file_path: /path/
+target_dir: /path/
 display_stats_freq: 1 # valid freq is equal to this
 
+
+DP:
+  epsilon: 11
+  delta: 6e-6
+  max_grad_norm: 4 # this has a direct relationship with controlling the sensitivity
+  logical_batch_size: 128
