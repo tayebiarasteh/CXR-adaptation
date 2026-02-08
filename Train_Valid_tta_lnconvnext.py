@@ -7,8 +7,14 @@ https://github.com/tayebiarasteh/
 
 Test-time adaptation for HF DINOv3-ConvNeXt (and similar AutoModel backbones) using:
 - Consistency between two light augmentations (radiology-safe)
-- An anchor (teacher) loss to prevent drifting away from the source model
-- A source-prior constraint (label marginal matching) enforced with a dual variable
+- A teacher anchor loss to prevent drifting away from the source model
+- A teacher-anchored marginal stability loss (batch marginal matching to teacher on same stream)
+
+Notes:
+- No entropy minimization
+- No source priors
+- Updates only LayerNorm affine params by default (optionally head)
+- Supports hard max_steps and optional automatic early stopping based on loss plateaus
 """
 
 import os
@@ -22,22 +28,8 @@ from config.serde import read_config
 _EPS = 1e-6
 
 
-def _consistency_mse(p1: torch.Tensor, p2: torch.Tensor) -> torch.Tensor:
-    """Mean squared error between two probability tensors (B,C)."""
-    return torch.mean((p1 - p2) ** 2)
-
-
-def _marginal_mse(p_batch: torch.Tensor, p_target: torch.Tensor) -> torch.Tensor:
-    """MSE between batch marginal (C,) and target marginal (C,)."""
-    p_bar = p_batch.mean(dim=0)
-    return torch.mean((p_bar - p_target) ** 2)
-
-
 def _is_layernorm_module(m: torch.nn.Module) -> bool:
-    """
-    DINOv3ConvNext uses custom LN: DINOv3ConvNextLayerNorm
-    plus a final torch.nn.LayerNorm((768,))
-    """
+    # catches: torch.nn.LayerNorm, DINOv3ConvNextLayerNorm, ConvNextLayerNorm, etc.
     if isinstance(m, torch.nn.LayerNorm):
         return True
     name = m.__class__.__name__.lower()
@@ -62,20 +54,34 @@ def _unfreeze_head(model: torch.nn.Module):
             p.requires_grad = True
 
 
+def _consistency_mse(p1: torch.Tensor, p2: torch.Tensor) -> torch.Tensor:
+    return torch.mean((p1 - p2) ** 2)
+
+
+def _batch_marginal_mse(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    """
+    p, q: (N,C) probabilities
+    compares per-class means across the batch (marginals),
+    anchored to TEACHER on the same target stream
+    """
+    mp = p.mean(dim=0)
+    mq = q.mean(dim=0)
+    return torch.mean((mp - mq) ** 2)
+
+
 class TTA_Adaptation:
     """
     Practical TTA for your setting:
 
     - Updates only LayerNorm affine parameters by default (adapt_ln=True).
-      (Optionally also update the classification head.)
-    - Uses only *unlabeled* target TRAIN split for adaptation.
+      Optionally also update the classification head.
+    - Uses only unlabeled target TRAIN split for adaptation.
     - Evaluates on target TEST split afterwards (handled in main).
 
-    Key difference vs before:
-      *No entropy minimization.*
-      We instead (i) keep predictions stable w.r.t. small perturbations,
-      (ii) keep the adapted model close to the source model (anchor),
-      (iii) prevent marginal collapse by matching source label priors.
+    Loss:
+      (i)  consistency under small aug
+      (ii) teacher anchor on clean image
+      (iii) teacher-anchored marginal stability
     """
 
     def __init__(self, cfg_path, label_names=None):
@@ -84,15 +90,13 @@ class TTA_Adaptation:
         self.label_names = label_names
         self.setup_cuda()
 
-        # Radiology-safe TTA aug on *tensor* images:
-        # - no horizontal flip
-        # - small rotation/translation
-        # - no color jitter (can break intensity semantics)
+        # Radiology-safe aug on tensor images:
+        # no horizontal flip, mild geometric jitter
         self.tta_aug = transforms.Compose([
             transforms.RandomAffine(
-                degrees=7,
-                translate=(0.02, 0.02),
-                scale=(0.98, 1.02)
+                degrees=10,
+                translate=(0.04, 0.04),
+                scale=(0.95, 1.05),
             ),
         ])
 
@@ -106,15 +110,12 @@ class TTA_Adaptation:
 
     @torch.no_grad()
     def _apply_aug_batch(self, x: torch.Tensor) -> torch.Tensor:
-        xs = []
-        for i in range(x.size(0)):
-            xs.append(self.tta_aug(x[i]))
+        xs = [self.tta_aug(x[i]) for i in range(x.size(0))]
         return torch.stack(xs, dim=0)
 
     def _forward_logits(self, model, x: torch.Tensor) -> torch.Tensor:
         out = model(x)
-        logits = model.head(out.pooler_output)  # HF DINOv3 ConvNeXt pattern
-        return logits
+        return model.head(out.pooler_output)  # HF DINOv3 ConvNeXt pattern
 
     def adapt(
         self,
@@ -122,42 +123,38 @@ class TTA_Adaptation:
         adapt_loader,
         save_name: str,
         # optimizer
-        lr: float = 1e-4,
+        lr: float = 5e-6,
         weight_decay: float = 0.0,
         # losses
         w_consistency: float = 1.0,
-        w_anchor: float = 1.0,
-        # source-prior constraint (dual)
-        source_priors=None,          # list/np/torch, shape (C,)
-        eps_prior: float = 0.002,    # allowed marginal mismatch
-        dual_lr: float = 0.05,
-        max_lambda: float = 100.0,
+        w_anchor: float = 0.5,
+        w_marginal: float = 0.5,
         # adaptation knobs
         steps_per_batch: int = 1,
         adapt_ln: bool = True,
         adapt_head: bool = False,
+        max_steps: int | None = 300,
         # logging
         log_every: int = 50,
+        # automatic early stop (optional)
+        auto_stop: bool = True,
+        ema_beta: float = 0.9,
+        min_delta: float = 1e-5,
+        patience_logs: int = 5,
     ):
         """
         Adapt model on unlabeled target data.
 
-        Parameters
-        ----------
-        source_priors:
-            Empirical label prevalence on SOURCE training data (MIMIC),
-            in the SAME order as label_names, values in [0,1].
-            Compute once from your MIMIC train CSV.
-        eps_prior:
-            Constraint threshold on marginal MSE.
-        """
-        if source_priors is None:
-            raise ValueError("source_priors must be provided (shape: (num_classes,)).")
+        max_steps:
+          Hard cap on adaptation iterations (None = full loader).
 
+        auto_stop:
+          Stops early if EMA of total loss does not improve by min_delta for patience_logs prints.
+        """
         model = model.to(self.device)
         model.train()
 
-        # Frozen teacher copy for anchoring (prevents drift / collapse)
+        # Frozen teacher copy for anchoring
         teacher = copy.deepcopy(model).to(self.device)
         teacher.eval()
         _set_requires_grad(teacher, False)
@@ -177,70 +174,84 @@ class TTA_Adaptation:
             trainable,
             lr=float(lr),
             weight_decay=float(weight_decay),
-            amsgrad=False
+            amsgrad=False,
         )
 
-        # Dual variable for marginal constraint
-        lam = torch.tensor(0.0, device=self.device)
-
-        # Priors to tensor
-        if not torch.is_tensor(source_priors):
-            source_priors = torch.tensor(source_priors, dtype=torch.float32)
-        source_priors = source_priors.to(self.device).clamp(0.0, 1.0)
-
         start = time.time()
+
+        # early stop trackers
+        ema_loss = None
+        best_ema = None
+        bad_logs = 0
+
+        denom = int(max_steps) if max_steps is not None else len(adapt_loader)
+
         for step, (img, _) in enumerate(adapt_loader):
+            if (max_steps is not None) and (step >= int(max_steps)):
+                break
+
             img = img.to(self.device)
 
-            # Two augmented views for consistency
             with torch.no_grad():
                 x1 = self._apply_aug_batch(img)
                 x2 = self._apply_aug_batch(img)
 
-                # Teacher prediction on the unaugmented image for anchor
-                t_logits = self._forward_logits(teacher, img)
-                t_prob = torch.sigmoid(t_logits).clamp(_EPS, 1.0 - _EPS)
+                t_logits0 = self._forward_logits(teacher, img)
+                t_prob0 = torch.sigmoid(t_logits0).clamp(_EPS, 1.0 - _EPS)
 
-            for _ in range(steps_per_batch):
+                # teacher on augmented views for marginal anchoring
+                t_logits1 = self._forward_logits(teacher, x1)
+                t_logits2 = self._forward_logits(teacher, x2)
+                t_prob12 = torch.sigmoid(torch.cat([t_logits1, t_logits2], dim=0)).clamp(_EPS, 1.0 - _EPS)
+
+            for _ in range(int(steps_per_batch)):
                 opt.zero_grad(set_to_none=True)
 
-                # Student predictions on aug views
                 s_logits1 = self._forward_logits(model, x1)
                 s_logits2 = self._forward_logits(model, x2)
                 p1 = torch.sigmoid(s_logits1).clamp(_EPS, 1.0 - _EPS)
                 p2 = torch.sigmoid(s_logits2).clamp(_EPS, 1.0 - _EPS)
 
-                # Student prediction on unaugmented image for anchor matching
                 s_logits0 = self._forward_logits(model, img)
                 p0 = torch.sigmoid(s_logits0).clamp(_EPS, 1.0 - _EPS)
 
                 loss_cons = _consistency_mse(p1, p2)
-                loss_anchor = torch.mean((p0 - t_prob) ** 2)
+                loss_anchor = torch.mean((p0 - t_prob0) ** 2)
 
-                # Marginal constraint on mean across the two views
-                p_stack = torch.cat([p1, p2], dim=0)  # (2B,C)
-                loss_prior = _marginal_mse(p_stack, source_priors)
+                p12 = torch.cat([p1, p2], dim=0)  # (2B,C)
+                loss_marginal = _batch_marginal_mse(p12, t_prob12)
 
-                # Lagrangian objective
-                loss = (w_consistency * loss_cons) + (w_anchor * loss_anchor) + lam * (loss_prior - eps_prior)
-                loss.backward()
+                total_loss = (w_consistency * loss_cons) + (w_anchor * loss_anchor) + (w_marginal * loss_marginal)
+                total_loss.backward()
                 opt.step()
 
-                # Dual ascent (projected)
-                with torch.no_grad():
-                    lam = lam + float(dual_lr) * (loss_prior.detach() - eps_prior)
-                    lam = torch.clamp(lam, 0.0, float(max_lambda))
+            # update EMA on the last total_loss computed
+            tl = float(total_loss.detach().item())
+            if ema_loss is None:
+                ema_loss = tl
+                best_ema = tl
+            else:
+                ema_loss = (ema_beta * ema_loss) + ((1.0 - ema_beta) * tl)
 
-            if (step % log_every) == 0:
+            if (step % int(log_every)) == 0:
                 elapsed = time.time() - start
                 print(
-                    f"[TTA] step {step}/{len(adapt_loader)} | "
+                    f"[TTA] step {step}/{denom} | "
                     f"cons={loss_cons.item():.6f} | anchor={loss_anchor.item():.6f} | "
-                    f"prior={loss_prior.item():.6f} (eps={eps_prior}) | lam={lam.item():.3f} | "
-                    f"time={elapsed:.1f}s"
+                    f"marg={loss_marginal.item():.6f} | total={total_loss.item():.6f} | "
+                    f"ema={ema_loss:.6f} | time={elapsed:.1f}s"
                 )
 
-        # Save adapted weights
+                if auto_stop:
+                    if best_ema is None or (best_ema - ema_loss) > float(min_delta):
+                        best_ema = ema_loss
+                        bad_logs = 0
+                    else:
+                        bad_logs += 1
+                        if bad_logs >= int(patience_logs):
+                            print(f"[TTA] early stop: ema plateau for {patience_logs} logs (min_delta={min_delta})")
+                            break
+
         os.makedirs(os.path.join(self.params["target_dir"], self.params["network_output_path"]), exist_ok=True)
         out_path = os.path.join(self.params["target_dir"], self.params["network_output_path"], save_name)
         torch.save(model.state_dict(), out_path)
