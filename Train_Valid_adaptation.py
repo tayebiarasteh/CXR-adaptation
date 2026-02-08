@@ -1,6 +1,6 @@
 """
 Created on October 27, 2025.
-Train_Valid_adaptation.py
+Train_Valid_dpdinov3.py
 
 @author: Soroosh Tayebi Arasteh <soroosh.arasteh@rwth-aachen.de>
 https://github.com/tayebiarasteh/
@@ -14,7 +14,9 @@ from tensorboardX import SummaryWriter
 import torch
 import torch.nn.functional as F
 from sklearn import metrics
+import matplotlib.pyplot as plt
 import copy
+from opacus.utils.batch_memory_manager import BatchMemoryManager
 
 from config.serde import read_config, write_config
 
@@ -97,7 +99,7 @@ class Training:
         return elapsed_hours, elapsed_mins, elapsed_secs
 
 
-    def setup_model(self, model, optimiser, loss_function, weight=None):
+    def setup_model(self, model, optimiser, loss_function, weight=None, privacy_engine=None):
         """Setting up all the models, optimizers, and loss functions.
 
         Parameters
@@ -133,6 +135,9 @@ class Training:
         self.params['Network'] = self.model_info
         write_config(self.params, self.cfg_path, sort_keys=True)
 
+        if privacy_engine is not None:
+            self.privacy_engine = privacy_engine
+
 
     def load_checkpoint(self, model, optimiser, loss_function, weight, label_names):
         """In case of resuming training from a checkpoint,
@@ -165,6 +170,49 @@ class Training:
 
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimiser.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.epoch = checkpoint['epoch']
+        self.best_loss = checkpoint['best_loss']
+        self.writer = SummaryWriter(log_dir=os.path.join(os.path.join(
+            self.params['target_dir'], self.params['tb_logs_path'])), purge_step=self.epoch + 1)
+
+
+
+    def load_checkpoint_DP(self, model, optimiser, loss_function, weight, label_names, privacy_engine):
+        """In case of resuming training from a checkpoint,
+        loads the weights for all the models, optimizers, and
+        loss functions, and device, tensorboard events, number
+        of iterations (epochs), and every info from checkpoint.
+
+        Parameters
+        ----------
+        model: model file
+            The network
+
+        optimiser: optimizer file
+            The optimizer
+
+        loss_function: loss file
+            The loss function
+        """
+        checkpoint = torch.load(os.path.join(self.params['target_dir'], self.params['network_output_path'],
+                                self.params['checkpoint_name']))
+        self.device = None
+        self.model_info = checkpoint['model_info']
+        self.setup_cuda()
+        self.model = model.to(self.device)
+        self.loss_weight = weight
+        self.loss_weight = self.loss_weight.to(self.device)
+        self.loss_function = loss_function(weight=self.loss_weight)
+        self.optimiser = optimiser
+        self.label_names = label_names
+
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimiser.load_state_dict(checkpoint['optimizer_state_dict'])
+
+        self.privacy_engine = privacy_engine
+        self.privacy_engine.load_checkpoint(module=self.model, optimizer=self.optimiser,
+                                                            path=os.path.join(self.params['target_dir'], self.params['network_output_path'], self.params['DP_checkpoint_name']))
+
         self.epoch = checkpoint['epoch']
         self.best_loss = checkpoint['best_loss']
         self.writer = SummaryWriter(log_dir=os.path.join(os.path.join(
@@ -247,6 +295,93 @@ class Training:
                     self.savings_prints(iteration_hours, iteration_mins, iteration_secs, total_hours,
                                         total_mins, total_secs, train_loss, total_time)
 
+
+    def train_DP_epoch(self, train_loader, valid_loader=None, num_epochs=1000):
+        """Training epoch
+        """
+        self.params = read_config(self.cfg_path)
+        total_start_time = time.time()
+
+        for epoch in range(num_epochs - self.epoch):
+            self.epoch += 1
+
+            # initializing the loss list
+            batch_loss = 0
+            start_time = time.time()
+
+            with BatchMemoryManager(data_loader=train_loader, max_physical_batch_size=32, optimizer=self.optimiser) as memory_safe_data_loader:
+
+                for idx, (image, label) in enumerate(train_loader):
+                    self.model.train()
+
+                    image = image.to(self.device)
+                    label = label.to(self.device)
+
+                    self.optimiser.zero_grad()
+
+                    with torch.set_grad_enabled(True):
+
+                        output = self.model(image)
+                        output = self.model.head(output.pooler_output)  # for convnext (both dino & imagnet)
+
+                        loss = self.loss_function(output, label) # for multilabel
+
+                        loss.backward()
+                        self.optimiser.step()
+
+                        batch_loss += loss.item()
+
+                        if (idx + 1) % 200 == 0:
+                            epsilon = self.privacy_engine.get_epsilon(float(self.params['DP']['delta']))
+                            print(
+                                f"\tTrain Epoch: {self.epoch} \t | "
+                                f"Loss: {batch_loss / (idx + 1):.6f} | "
+                                f"(ε = {epsilon:.2f}, δ = {float(self.params['DP']['delta'])})")
+
+            train_loss = batch_loss / len(train_loader)
+            # self.writer.add_scalar('Train_loss_avg', train_loss, self.epoch)
+            self.writer.add_scalar('Epsilon', self.privacy_engine.get_epsilon(float(self.params['DP']['delta'])), self.epoch)
+
+            # Saves information about training to config file
+            self.params['Network']['num_epoch'] = self.epoch
+            write_config(self.params, self.cfg_path, sort_keys=True)
+
+            ######## Save a checkpoint every epoch ########
+            self.privacy_engine.save_checkpoint(path=os.path.join(self.params['target_dir'], self.params['network_output_path'],
+                                  self.params['DP_checkpoint_name']), module=self.model, optimizer=self.optimiser)
+            torch.save({'epoch': self.epoch,
+                        'model_state_dict': self.model.state_dict(),
+                        'optimizer_state_dict': self.optimiser.state_dict(),
+                        'loss_state_dict': self.loss_function.state_dict(),
+                        'model_info': self.model_info, 'best_loss': self.best_loss},
+                       os.path.join(self.params['target_dir'], self.params['network_output_path'],
+                                    self.params['checkpoint_name']))
+            ######## Save a checkpoint every epoch ########
+
+            # Validation iteration & calculate metrics
+            if (self.epoch) % (self.params['display_stats_freq']) == 0:
+
+                # saving the model, checkpoint, TensorBoard, etc.
+                if not valid_loader == None:
+                    valid_loss, valid_F1, valid_AUC, valid_accuracy, valid_specificity, valid_sensitivity, valid_precision, optimal_threshold = self.valid_epoch(valid_loader)
+                    end_time = time.time()
+                    total_time = end_time - total_start_time
+                    iteration_hours, iteration_mins, iteration_secs = self.time_duration(start_time, end_time)
+                    total_hours, total_mins, total_secs = self.time_duration(total_start_time, end_time)
+
+                    self.calculate_tb_stats(valid_loss=valid_loss, valid_F1=valid_F1, valid_AUC=valid_AUC, valid_accuracy=valid_accuracy, valid_specificity=valid_specificity,
+                                            valid_sensitivity=valid_sensitivity, valid_precision=valid_precision)
+                    self.savings_prints(iteration_hours, iteration_mins, iteration_secs, total_hours,
+                                        total_mins, total_secs, train_loss, total_time, valid_loss=valid_loss, valid_F1=valid_F1,
+                                        valid_AUC=valid_AUC, valid_accuracy=valid_accuracy, valid_specificity= valid_specificity,
+                                        valid_sensitivity=valid_sensitivity, valid_precision=valid_precision,  privacy_engine=True, optimal_thresholds=optimal_threshold)
+                else:
+                    end_time = time.time()
+                    total_time = end_time - total_start_time
+                    iteration_hours, iteration_mins, iteration_secs = self.time_duration(start_time, end_time)
+                    total_hours, total_mins, total_secs = self.time_duration(total_start_time, end_time)
+                    self.savings_prints(iteration_hours, iteration_mins, iteration_secs, total_hours,
+                                        total_mins, total_secs, train_loss, total_time)
 
 
     def valid_epoch(self, valid_loader):

@@ -1,6 +1,6 @@
 """
 Created on October 27, 2025.
-Prediction_adaptation.py
+Prediction_dpdinov3.py
 
 @author: Soroosh Tayebi Arasteh <soroosh.arasteh@rwth-aachen.de>
 https://github.com/tayebiarasteh/
@@ -59,10 +59,13 @@ class Prediction:
         self.model.load_state_dict(torch.load(os.path.join(self.params['target_dir'], self.params['network_output_path']) + "epoch" + str(epoch_num) + "_" + model_file_name))
 
 
-    def setup_model_adapted(self, model, save_name):
-        self.model = model.to(self.device)
 
-        self.model.load_state_dict(torch.load(os.path.join(self.params['target_dir'], self.params['network_output_path'], save_name)))
+    def setup_model_DP(self, model, privacy_engine, epoch_num=10):
+        self.device = None
+        self.setup_cuda()
+        self.model = model.to(self.device)
+        self.privacy_engine = privacy_engine
+        self.privacy_engine.load_checkpoint(module=self.model, path=os.path.join(self.params['target_dir'], self.params['network_output_path']) + "epoch" + str(epoch_num) + "_" + self.params['DP_checkpoint_name'])
 
 
 
@@ -96,6 +99,7 @@ class Prediction:
 
 
 
+
     def evaluate_2D(self, test_loader):
         """Testing 2D-wise.
 
@@ -125,7 +129,6 @@ class Prediction:
 
             with torch.no_grad():
                 output = self.model(image)
-                output = self.model.head(output.pooler_output) # for convnext (both dino & imagnet)
 
                 output_sigmoided = F.sigmoid(output)
 
@@ -145,12 +148,12 @@ class Prediction:
             optimal_idx = np.argmax(tpr - fpr)
             optimal_threshold[idx] = thresholds[optimal_idx]
 
-            # metrics.RocCurveDisplay(fpr=fpr, tpr=tpr).plot()
-            # plt.annotate('working point', xy=(fpr[optimal_idx], tpr[optimal_idx]), xycoords='data',
-            #              arrowprops=dict(facecolor='red'))
-            # plt.grid()
-            # plt.title(self.label_names[idx] + f' | threshold: {optimal_threshold[idx]:.4f}')
-            # plt.savefig(os.path.join(self.params['target_dir'], self.params['stat_log_path'], self.label_names[idx] + '.png'))
+            metrics.RocCurveDisplay(fpr=fpr, tpr=tpr).plot()
+            plt.annotate('working point', xy=(fpr[optimal_idx], tpr[optimal_idx]), xycoords='data',
+                         arrowprops=dict(facecolor='red'))
+            plt.grid()
+            plt.title(self.label_names[idx] + f' | threshold: {optimal_threshold[idx]:.4f}')
+            plt.savefig(os.path.join(self.params['target_dir'], self.params['stat_log_path'], self.label_names[idx] + '.png'))
 
         predicted_labels = (preds_with_sigmoid_cache > optimal_threshold).astype(np.int32)
 
