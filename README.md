@@ -1,7 +1,9 @@
 # DP-RGMI: Differential privacy representation geometry for medical image analysis
 
 
-This is the official repository of the paper [**Differential privacy representation geometry for medical image analysis**](TODO).
+This is the official repository of the paper **Differential privacy representation geometry for medical image analysis**.
+
+Preprint version: [**URL**](https://arxiv.org/abs/2603.01098).
 
 
 
@@ -84,7 +86,7 @@ python main_representationDP.py --config ./configs/config.yaml --experiment name
 
 ## In case you use this repository, please cite the original paper:
 
-S. Tayebi Arasteh, M. Mohammadi, S. Nebelung, D. Truhn. *Differential privacy representation geometry for medical image analysis*. (2026). 
+S. Tayebi Arasteh, M. Mohammadi, S. Nebelung, D. Truhn. *Differential privacy representation geometry for medical image analysis*. MICCAI 2026. 
 
 ### BibTex
 
@@ -92,5 +94,5 @@ S. Tayebi Arasteh, M. Mohammadi, S. Nebelung, D. Truhn. *Differential privacy re
       author = {Tayebi Arasteh, Soroosh and Mohammadi, Marziyeh and Nebelung, Sven and Truhn, Daniel},
       title = {Differential privacy representation geometry for medical image analysis},
       year = {2026},
-      journal = {arXiv preprint},
+      journal = {MICCAI},
     }
