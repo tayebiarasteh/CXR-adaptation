@@ -9,7 +9,7 @@ Preprint version: [**URL**](https://arxiv.org/abs/2603.01098).
 
 ## Environment setup
 
-Training and evaluation were performed strictly in FP32. The implementation was based on Python 3.10 using PyTorch 2.5 and torchvision 0.20. Core scientific computing libraries included NumPy 2.2, SciPy 1.15, scikit-learn 1.7, pandas 2.3, Opacus 1.2, and OpenCV 4.12. Hugging Face tooling comprised transformers 4.56, huggingface-hub 0.34, accelerate 1.10, tokenizers 0.21, and safetensors 0.6.
+Training and evaluation were performed strictly in FP32. The implementation was based on Python 3.10 using PyTorch 2.5 and torchvision 0.20. Core scientific computing libraries included NumPy 2.2, SciPy 1.15, scikit-learn 1.7, pandas 2.3, Opacus 1.5, and OpenCV 4.12. Hugging Face tooling comprised transformers 4.56, huggingface-hub 0.34, accelerate 1.10, tokenizers 0.21, and safetensors 0.6.
 
 ### Prerequisites
 
@@ -47,7 +47,7 @@ $ python -m pip install \
   jupyter \
   scikit-learn \
   opencv-python \
-  opacus==1.2
+  opacus
 ```
 
 
